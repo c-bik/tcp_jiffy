@@ -14,6 +14,7 @@ start_link(Ip, Port) when is_integer(Port) ->
 
 %% Callbacks
 init([Ip, Port]) ->
+    process_flag(trap_exit, true),
     PrivDir = case code:priv_dir(tcp_jiffy) of
         {error,_} -> "./priv/";
         PDir -> PDir

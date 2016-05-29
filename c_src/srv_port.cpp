@@ -10,7 +10,6 @@
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <fcntl.h>
-//#include <stdint.h>
 
 #define MAX_EVENTS 10
 #define BUF_SIZE 1024
@@ -49,7 +48,7 @@ struct _data_cmd {
 #define LOG 4
 struct _log_cmd {
     uint8_t cmd;
-    uint8_t buf[0xFFFFFF];
+    uint8_t buf[0xFFFF];
 } log_cmd;
 
 int read_cmd()
@@ -72,8 +71,8 @@ int read_cmd()
 int write_cmd()
 {
     int i = 0;
-    uint32_t wrote = 0, len = htonl(tx_buf.len);
-    tx_buf.len = len;
+    uint32_t wrote = 0, len = tx_buf.len;
+    tx_buf.len = htonl(len);
     len += 4;
     do {
         if ((i = write(stdo, &tx_buf.buf[wrote], len - wrote)) <= 0)
@@ -93,7 +92,7 @@ int write_cmd()
 #define L(F, ...) \
     sprintf((char*)log_cmd.buf, "[%s:%d] "F,__FUNCTION__,__LINE__,__VA_ARGS__);\
     tx_buf.len = strlen((char*)log_cmd.buf)+1;\
-    memcpy(tx_buf.buf+4, &log_cmd, tx_buf.len+1);\
+    memcpy(tx_buf.buf+sizeof(uint32_t), &log_cmd, tx_buf.len);\
     write_cmd();\
 
 int main(int argc, char *argv[])
