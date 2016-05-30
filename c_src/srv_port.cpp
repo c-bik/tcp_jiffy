@@ -125,8 +125,6 @@ int main(int argc, char *argv[])
     bind(listen_sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
     listen(listen_sock, 10);
 
-    L("listening %s %s\n", argv[1], argv[2]);
-
     epollfd = epoll_create(10);
     if (epollfd == -1) {
         perror("epoll_create");
@@ -144,7 +142,7 @@ int main(int argc, char *argv[])
     socklen_t addrlen;
     char buf[BUF_SIZE];
     memset(buf, 0, BUF_SIZE);
-    L0("starting epoll loop\n");
+    L("listening %s %s\n", argv[1], argv[2]);
     for (;;) {
         nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
         if (nfds == -1) {
@@ -165,7 +163,7 @@ int main(int argc, char *argv[])
                 connect_cmd.port = ntohs(local.sin_port);
                 connect_cmd.socket = conn_sock;
                 tx_buf.len = sizeof(connect_cmd);
-                memcpy(tx_buf.buf+4, &connect_cmd, tx_buf.len);
+                memcpy(tx_buf.buf+sizeof(uint32_t), &connect_cmd, tx_buf.len);
                 write_cmd();
 
                 if (fcntl(conn_sock, F_SETFL, fcntl(conn_sock, F_GETFL, 0) | O_NONBLOCK)
