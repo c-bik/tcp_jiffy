@@ -12,88 +12,91 @@
 #include <fcntl.h>
 
 #define MAX_EVENTS 10
-#define BUF_SIZE 1024
 
 static int stdi = 0, stdo = 1;
 
-union _buffer {
-    uint32_t len;
-    uint8_t buf[0xFFFFFFFF+4];
-} rx_buf, tx_buf;
+enum cmd {
+    CONNECT     = 0,
+    DISCONNECT  = 1,
+    DATA        = 2,
+    LOG         = 3
+};
 
-#define CONNECT 0
-struct _connect_cmd {
-    uint8_t cmd;
+struct __attribute__((__packed__)) _conn {
+    uint32_t len;
+    uint8_t  cmd;
     uint32_t ip_addr;
     uint16_t port;
     uint32_t socket;
-} connect_cmd;
+} conn;
 
-#define DISCONNECT 1
-struct _disconnect_cmd {
-    uint8_t cmd;
+struct _dconn {
+    uint32_t len;
+    uint8_t  cmd;
     uint32_t socket;
-} disconnect_cmd;
+} dconn;
 
-#define DATA 3
-struct _data_cmd {
-    uint8_t cmd;
-    uint32_t socket;
-    union {
-        uint32_t len;
-        uint8_t * buf;
-    };
-} data_cmd;
+#define BUF_SIZE 0xFFFFFF
+struct __attribute__((__packed__)) _data {
+    uint32_t  len;
+    uint8_t   cmd;
+    uint32_t  socket;
+    char buf[BUF_SIZE];
+} data;
 
-#define LOG 4
-struct _log_cmd {
-    uint8_t cmd;
-    uint8_t buf[0xFFFF];
-} log_cmd;
+#define LOG_SIZE 0xFFFF
+struct _log {
+    uint32_t len;
+    uint8_t  cmd;
+    uint8_t  str[LOG_SIZE];
+} log;
 
-int read_cmd()
+void dump(const char * title, void *buf, uint32_t len)
 {
-    int i = 0;
-    uint32_t got = 0, len = 4;
-    if ((i = read(stdi, &rx_buf.buf[got], 4)) < 4)
-        return -1;
-    got+=4;
-    rx_buf.len = ntohl(*((uint32_t*)&rx_buf.buf[0]));
-    len += rx_buf.len;
-    do {
-        if ((i = read(stdi, &rx_buf.buf[got], len-got)) <= 0)
-            return i;
-        got += i;
-    } while (got < len);
-    return len;
+    printf("%s (%d) : ", title, len);
+    for (uint32_t i = 0; i < len; ++i)
+        printf("16#%x,", ((uint8_t*)buf)[i]);
+    printf("\r\n");
 }
 
-int write_cmd()
+//int read_cmd()
+//{
+//    int i = 0;
+//    uint32_t got = 0, len = 4;
+//    if ((i = read(stdi, &rx_buf.buf[got], 4)) < 4)
+//        return -1;
+//    got+=4;
+//    rx_buf.len = ntohl(*((uint32_t*)&rx_buf.buf[0]));
+//    len += rx_buf.len;
+//    do {
+//        if ((i = read(stdi, &rx_buf.buf[got], len-got)) <= 0)
+//            return i;
+//        got += i;
+//    } while (got < len);
+//    return len;
+//}
+
+int write_cmd(void *buf, uint32_t len)
 {
     int i = 0;
-    uint32_t wrote = 0, len = tx_buf.len;
-    tx_buf.len = htonl(len);
-    len += 4;
+    uint32_t wrote = 0;
     do {
-        if ((i = write(stdo, &tx_buf.buf[wrote], len - wrote)) <= 0)
+        if ((i = write(stdo, (uint8_t*)buf + wrote, len - wrote)) <= 0)
             return i;
         wrote += i;
     } while (wrote < len);
-
     return len;
 }
 
 #define L0(F) \
-    sprintf((char*)log_cmd.buf, "[%s:%d] "F,__FUNCTION__,__LINE__);\
-    tx_buf.len = strlen((char*)log_cmd.buf)+1;\
-    memcpy(tx_buf.buf+4, &log_cmd, tx_buf.len+1);\
-    write_cmd();\
+    sprintf((char*)log.str, "[%s:%d] "F,__FUNCTION__,__LINE__);\
+    log.len = htonl(strlen((char*)log.str)+1);\
+    write_cmd(&log, ntohl(log.len)+sizeof(log.len));
 
 #define L(F, ...) \
-    sprintf((char*)log_cmd.buf, "[%s:%d] "F,__FUNCTION__,__LINE__,__VA_ARGS__);\
-    tx_buf.len = strlen((char*)log_cmd.buf)+1;\
-    memcpy(tx_buf.buf+sizeof(uint32_t), &log_cmd, tx_buf.len);\
-    write_cmd();\
+    sprintf((char*)log.str, "[%s:%d] "F,__FUNCTION__,__LINE__,__VA_ARGS__);\
+    log.len = htonl(strlen((char*)log.str)+1);\
+    write_cmd(&log, ntohl(log.len)+sizeof(log.len));
 
 int main(int argc, char *argv[])
 {
@@ -102,10 +105,18 @@ int main(int argc, char *argv[])
     struct sockaddr_in serv_addr;
     pid_t childPid;
 
-    connect_cmd.cmd = CONNECT;
-    disconnect_cmd.cmd = DISCONNECT;
-    data_cmd.cmd = DATA;
-    log_cmd.cmd = LOG;
+    memset(&log,   0, sizeof(log));
+    memset(&conn,  0, sizeof(conn));
+    memset(&data,  0, sizeof(data));
+    memset(&dconn, 0, sizeof(dconn));
+
+    log.cmd   = LOG;
+    conn.cmd  = CONNECT;
+    dconn.cmd = DISCONNECT;
+    data.cmd  = DATA;
+
+    conn.len  = htonl(sizeof(conn) - sizeof(conn.len));
+    dconn.len = htonl(sizeof(dconn) - sizeof(dconn.len));
 
     listen_sock = socket(AF_INET, SOCK_STREAM, 0);
     memset(&serv_addr, '0', sizeof(serv_addr));
@@ -140,9 +151,8 @@ int main(int argc, char *argv[])
 
     struct sockaddr_in local;
     socklen_t addrlen;
-    char buf[BUF_SIZE];
-    memset(buf, 0, BUF_SIZE);
     L("listening %s %s\n", argv[1], argv[2]);
+    L("sizeof(data) %d\n", sizeof(data));
     for (;;) {
         nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
         if (nfds == -1) {
@@ -152,6 +162,7 @@ int main(int argc, char *argv[])
 
         for (int n = 0; n < nfds; ++n) {
             if (events[n].data.fd == listen_sock) {
+                memset(&local, 0, sizeof(sockaddr_in));
                 conn_sock = accept(listen_sock,
                                 (struct sockaddr *) &local, &addrlen);
                 if (conn_sock == -1) {
@@ -159,12 +170,10 @@ int main(int argc, char *argv[])
                     exit(EXIT_FAILURE);
                 }
 
-                connect_cmd.ip_addr = local.sin_addr.s_addr;
-                connect_cmd.port = ntohs(local.sin_port);
-                connect_cmd.socket = conn_sock;
-                tx_buf.len = sizeof(connect_cmd);
-                memcpy(tx_buf.buf+sizeof(uint32_t), &connect_cmd, tx_buf.len);
-                write_cmd();
+                conn.ip_addr = htonl(local.sin_addr.s_addr);
+                conn.port = htons(local.sin_port);
+                conn.socket = conn_sock;
+                write_cmd(&conn, sizeof(conn));
 
                 if (fcntl(conn_sock, F_SETFL, fcntl(conn_sock, F_GETFL, 0) | O_NONBLOCK)
                      < 0) {
@@ -180,16 +189,20 @@ int main(int argc, char *argv[])
                 }
             } else {
                 while(true) {
-                    ssize_t len = recv(events[n].data.fd, buf, BUF_SIZE, MSG_DONTWAIT);
+                    ssize_t len = recv(events[n].data.fd, data.buf, BUF_SIZE, MSG_DONTWAIT);
                     if (len < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK)
                         break;
                     } else if (len > 0) {
-                        L0("RX :");
+                        /*L0("RX :");
                         for(int i = 0; i < len; ++i) {
-                            L("%02X ", buf[i]);
+                            L("%02X ", data.buf[i]);
                         }
-                        L0("\n");
+                        L0("\n");*/
+                        len += (sizeof(data.cmd) + sizeof(data.socket));
+                        data.len = htonl(len);
+                        data.socket = events[n].data.fd;
+                        write_cmd(&data, len + sizeof(data.len));
                     } else {
                         L0("peer closed\n");
                         break;
