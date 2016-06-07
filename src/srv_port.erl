@@ -7,6 +7,9 @@
 
 -record(state, {port}).
 
+-define(L(__F,__A), io:format("[~p:~p] "__F"~n", [?MODULE, ?LINE | __A])).
+-define(L(__F),     ?L(__F, [])).
+
 start_link(Ip, Port) when is_integer(Port) ->
     {ok, Addr} = inet:getaddr(Ip, inet),
     IpStr = inet:ntoa(Addr),
@@ -38,18 +41,19 @@ start_exe(Executable, Ip, Port) ->
                 [{packet, 4}, binary, exit_status, use_stdio,
                  {args, [Ip, Port]}])) of
         {'EXIT', Reason} ->
-            io:format("open port failed ~p~n", [Reason]),
+            ?L("open port failed ~p", [Reason]),
             {stop, Reason};
         PortHandle ->
+            ?L("Port ~p", [erlang:port_info(PortHandle)]),
             {ok, #state{port=PortHandle}}
     end.
 
 handle_call(Req, From, State) ->
-    io:format("unexpected call ~p ~p~n", [From, Req]),
+    ?L("unexpected call ~p ~p", [From, Req]),
     {stop, unimplemented, unimplemented, State}.
 
 handle_cast(Msg, State) ->
-    io:format("unexpected cast ~p~n", [Msg]),
+    ?L("unexpected cast ~p", [Msg]),
     {stop, unimplemented, State}.
 
 -define(CONNECT,    0).
@@ -57,33 +61,41 @@ handle_cast(Msg, State) ->
 -define(DATA,       2).
 -define(LOG,        3).
 handle_info({Port, {data, <<?DATA:8,Sock:32,Data/binary>>}}, #state{port=Port} = State) ->
-    io:format("~p: Data ~p~n", [Sock, Data]),
+    ?L("~p: Data ~p", [Sock, Data]),
     {noreply, State};
 handle_info({Port, {data, <<?DISCONNECT:8,_:24,Sock:32>>}}, #state{port=Port} = State) ->
-    io:format("disconnect ~p~n", [Sock]),
+    ?L("disconnect ~p", [Sock]),
     {noreply, State};
 handle_info({Port, {data, <<?CONNECT:8,Ip1:8,Ip2:8,Ip3:8,Ip4:8,Prt:16,Sock:32>>}},
             #state{port=Port} = State) ->
-    io:format("Connect ~s:~p ~p~n", [inet:ntoa({Ip4,Ip3,Ip2,Ip1}), Prt, Sock]),
+    ?L("Connect ~s:~p ~p", [inet:ntoa({Ip4,Ip3,Ip2,Ip1}), Prt, Sock]),
     {noreply, State};
 handle_info({Port, {data, <<?LOG:8,Log/binary>>}}, #state{port=Port} = State) ->
-    io:format("~s", [Log]),
+    ?L("~s", [Log]),
     {noreply, State};
 handle_info({Port, {data, <<>>}}, #state{port=Port} = State) ->
     {noreply, State};
 handle_info({Port, {data, Data}}, #state{port=Port} = State) ->
-    io:format("RX ~w~n", [Data]),
+    ?L("RX ~w", [Data]),
     {noreply, State};
 handle_info({Port, {exit_status, Status}}, #state{port = Port} = State) ->
-    io:format("~p exit with status ~p~n", [Port, Status]),
+    ?L("~p exit with status ~p", [Port, Status]),
     {stop, port_exit, State};
 handle_info(Info, State) ->
-    io:format("unexpected info ~p~n", [Info]),
+    ?L("unexpected info ~p", [Info]),
     {stop, unimplemented, State}.
 
 terminate(Reason, #state{port=Port}) ->
-    io:format("exit port with reason ~p", [Reason]),
-    catch port_close(Port).
+    ?L("exit port with reason ~p", [Reason]),
+    case erlang:port_info(Port) of
+        undefined -> ?L("port already dead");
+        _ ->
+            case catch port_close(Port) of
+                true -> ok;
+                Error ->
+                    ?L("error closing port: ~p", [Error])
+            end
+    end.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
