@@ -61,9 +61,14 @@ handle_cast(Msg, State) ->
 -define(DATA,       2).
 -define(LOG,        3).
 handle_info({Port, {data, <<?DATA:8,Sock:32,Data/binary>>}}, #state{port=Port} = State) ->
-    ?L("~p: Data ~p", [Sock, Data]),
+    true = case Data of
+        <<"close\n">> ->
+            port_command(Port, <<?DISCONNECT:8,Sock:32>>);
+        _ ->
+            port_command(Port, <<?DATA:8,Sock:32,"SRV : ",Data/binary>>)
+    end,
     {noreply, State};
-handle_info({Port, {data, <<?DISCONNECT:8,_:24,Sock:32>>}}, #state{port=Port} = State) ->
+handle_info({Port, {data, <<?DISCONNECT:8,Sock:32>>}}, #state{port=Port} = State) ->
     ?L("disconnect ~p", [Sock]),
     {noreply, State};
 handle_info({Port, {data, <<?CONNECT:8,Ip1:8,Ip2:8,Ip3:8,Ip4:8,Prt:16,Sock:32>>}},
@@ -71,7 +76,7 @@ handle_info({Port, {data, <<?CONNECT:8,Ip1:8,Ip2:8,Ip3:8,Ip4:8,Prt:16,Sock:32>>}
     ?L("Connect ~s:~p ~p", [inet:ntoa({Ip4,Ip3,Ip2,Ip1}), Prt, Sock]),
     {noreply, State};
 handle_info({Port, {data, <<?LOG:8,Log/binary>>}}, #state{port=Port} = State) ->
-    ?L("~s", [Log]),
+    io:format("~s", [Log]),
     {noreply, State};
 handle_info({Port, {data, <<>>}}, #state{port=Port} = State) ->
     {noreply, State};

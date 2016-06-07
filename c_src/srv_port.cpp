@@ -10,6 +10,7 @@
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <stddef.h>
 
 #define MAX_EVENTS 10
 
@@ -30,7 +31,7 @@ struct __attribute__((__packed__)) _conn {
     uint32_t socket;
 } conn;
 
-struct _dconn {
+struct __attribute__((__packed__)) _dconn {
     uint32_t len;
     uint8_t  cmd;
     uint32_t socket;
@@ -59,22 +60,15 @@ void dump(const char * title, void *buf, uint32_t len)
     printf("\r\n");
 }
 
-//int read_cmd()
-//{
-//    int i = 0;
-//    uint32_t got = 0, len = 4;
-//    if ((i = read(stdi, &rx_buf.buf[got], 4)) < 4)
-//        return -1;
-//    got+=4;
-//    rx_buf.len = ntohl(*((uint32_t*)&rx_buf.buf[0]));
-//    len += rx_buf.len;
-//    do {
-//        if ((i = read(stdi, &rx_buf.buf[got], len-got)) <= 0)
-//            return i;
-//        got += i;
-//    } while (got < len);
-//    return len;
-//}
+#define L0(F) \
+    sprintf((char*)log.str, "PORT [%s:%d] "F,__FUNCTION__,__LINE__);\
+    log.len = htonl(strlen((char*)log.str)+1);\
+    write_cmd(&log, ntohl(log.len)+sizeof(log.len));
+
+#define L(F, ...) \
+    sprintf((char*)log.str, "PORT [%s:%d] "F,__FUNCTION__,__LINE__,__VA_ARGS__);\
+    log.len = htonl(strlen((char*)log.str)+1);\
+    write_cmd(&log, ntohl(log.len)+sizeof(log.len));
 
 int write_cmd(void *buf, uint32_t len)
 {
@@ -88,15 +82,35 @@ int write_cmd(void *buf, uint32_t len)
     return len;
 }
 
-#define L0(F) \
-    sprintf((char*)log.str, "[%s:%d] "F,__FUNCTION__,__LINE__);\
-    log.len = htonl(strlen((char*)log.str)+1);\
-    write_cmd(&log, ntohl(log.len)+sizeof(log.len));
+int read_cmd()
+{
+    int i = 0;
+    uint32_t got = 0, len;
+    uint8_t cmd;
+    uint8_t * buf;
 
-#define L(F, ...) \
-    sprintf((char*)log.str, "[%s:%d] "F,__FUNCTION__,__LINE__,__VA_ARGS__);\
-    log.len = htonl(strlen((char*)log.str)+1);\
-    write_cmd(&log, ntohl(log.len)+sizeof(log.len));
+    if ((i = read(stdi, &len, 4)) < 4)
+        return -1;
+    len = ntohl(len);
+
+    if ((i = read(stdi, &cmd, 1)) < 1)
+        return -1;
+
+    if (cmd == DATA) {
+        data.len = len;
+        buf = ((uint8_t*)&data) + offsetof(struct _data, socket);
+    } else if (cmd == DISCONNECT) {
+        dconn.len = len;
+        buf = ((uint8_t*)&dconn) + offsetof(struct _dconn, socket);
+    }
+    len -= sizeof(uint8_t);
+    do {
+        if ((i = read(stdi, buf+got, len-got)) <= 0)
+            return i;
+        got += i;
+    } while (got < len);
+    return cmd;
+}
 
 int main(int argc, char *argv[])
 {
@@ -142,6 +156,7 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
+    // listen sock
     ev.events = EPOLLIN;
     ev.data.fd = listen_sock;
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, listen_sock, &ev) == -1) {
@@ -149,10 +164,17 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
+    // port std input
+    ev.events = EPOLLIN | EPOLLET;
+    ev.data.fd = stdi;
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, stdi, &ev) == -1) {
+        perror("epoll_ctl: conn_sock");
+        exit(EXIT_FAILURE);
+    }
+
     struct sockaddr_in local;
     socklen_t addrlen;
     L("listening %s %s\n", argv[1], argv[2]);
-    L("sizeof(data) %d\n", sizeof(data));
     for (;;) {
         nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
         if (nfds == -1) {
@@ -170,11 +192,6 @@ int main(int argc, char *argv[])
                     exit(EXIT_FAILURE);
                 }
 
-                conn.ip_addr = htonl(local.sin_addr.s_addr);
-                conn.port = htons(local.sin_port);
-                conn.socket = conn_sock;
-                write_cmd(&conn, sizeof(conn));
-
                 if (fcntl(conn_sock, F_SETFL, fcntl(conn_sock, F_GETFL, 0) | O_NONBLOCK)
                      < 0) {
                     perror("calling fcntl");
@@ -187,9 +204,43 @@ int main(int argc, char *argv[])
                     perror("epoll_ctl: conn_sock");
                     exit(EXIT_FAILURE);
                 }
+
+                conn.ip_addr = htonl(local.sin_addr.s_addr);
+                conn.port = htons(local.sin_port);
+                conn.socket = conn_sock;
+                write_cmd(&conn, sizeof(conn));
+            } else if (events[n].data.fd == stdi) {
+                uint8_t cmd = read_cmd();
+                switch(cmd) {
+                    case DATA: {
+                        uint32_t len = data.len - sizeof(data.cmd) - sizeof(data.socket);
+                        if(write(data.socket, data.buf, len) < 0) {
+                            L("ERROR FWD erlang DATA RX %d : %d bytes\n", data.socket, len);
+                            perror("write : data.socket");
+                            exit(EXIT_FAILURE);
+                        }
+                        break;
+                    };
+                    case DISCONNECT:
+                        if (epoll_ctl(epollfd, EPOLL_CTL_DEL,
+                                      dconn.socket, NULL) == -1) {
+                            perror("epoll_ctl: dconn.socket");
+                            exit(EXIT_FAILURE);
+                        }
+                        if (close(dconn.socket) < 0) {
+                            perror("close: dconn.socket");
+                            exit(EXIT_FAILURE);
+                        }
+                        L("erlang closed %d\n", dconn.socket);
+                        break;
+                    default:
+                        L("ERROR command %d not supported\n", cmd);
+                        break;
+                }
             } else {
                 while(true) {
-                    ssize_t len = recv(events[n].data.fd, data.buf, BUF_SIZE, MSG_DONTWAIT);
+                    ssize_t len = recv(events[n].data.fd, data.buf, BUF_SIZE,
+                                       MSG_DONTWAIT);
                     if (len < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK)
                         break;
@@ -204,6 +255,11 @@ int main(int argc, char *argv[])
                         data.socket = events[n].data.fd;
                         write_cmd(&data, len + sizeof(data.len));
                     } else {
+                        if (epoll_ctl(epollfd, EPOLL_CTL_DEL,
+                                      events[n].data.fd, NULL) == -1) {
+                            perror("epoll_ctl: conn_sock");
+                            exit(EXIT_FAILURE);
+                        }
                         L0("peer closed\n");
                         break;
                     }
