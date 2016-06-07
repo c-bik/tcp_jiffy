@@ -65,7 +65,7 @@ handle_info({Port, {data, <<?DATA:8,Sock:32,Data/binary>>}}, #state{port=Port} =
         <<"close\n">> ->
             port_command(Port, <<?DISCONNECT:8,Sock:32>>);
         _ ->
-            port_command(Port, <<?DATA:8,Sock:32,"SRV : ",Data/binary>>)
+            port_command(Port, <<?DATA:8,Sock:32,Data/binary>>)
     end,
     {noreply, State};
 handle_info({Port, {data, <<?DISCONNECT:8,Sock:32>>}}, #state{port=Port} = State) ->
