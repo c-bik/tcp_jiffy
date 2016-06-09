@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stddef.h>
+#include <pthread.h>
 
 #define MAX_EVENTS 10
 
@@ -112,12 +113,80 @@ int read_cmd()
     return cmd;
 }
 
+uint8_t buf[BUF_SIZE];
+
+#define THREADS 8
+void print_tid(char *tid)
+{
+    pthread_t pt = pthread_self();
+    unsigned char *ptc = (unsigned char*)(void*)(&pt);
+    for (size_t i=0; i<sizeof(pt); i++) {
+        sprintf(tid+i*2, "%02x", (unsigned)(ptc[i]));
+    }
+}
+
+void *epoll_socks_thread(void *epollfd)
+{
+    struct epoll_event events[MAX_EVENTS];
+    int nfds;
+    int *eplfd = (int *)epollfd;
+    int tidsize = sizeof(pthread_t)*2+1;
+    char tid[tidsize];
+    memset(tid, '\0', tidsize);
+    print_tid(tid);
+    fprintf(stderr, "[0x%s] eplfd %d\r\n", tid, *eplfd);
+
+    while(true) {
+        nfds = epoll_wait(*eplfd, events, MAX_EVENTS, -1);
+        if (nfds == -1) {
+            perror("epoll_pwait");
+            exit(EXIT_FAILURE);
+        }
+
+        for (int n = 0; n < nfds; ++n) {
+            while(true) {
+                ssize_t len = recv(events[n].data.fd, buf, BUF_SIZE,
+                                   MSG_DONTWAIT);
+                if (len < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    break;
+                } else if (len > 0) {
+                    /*L0("RX :");
+                    for(int i = 0; i < len; ++i) {
+                        L("%02X ", data.buf[i]);
+                    }
+                    L0("\n");*/
+                    /*len += (sizeof(data.cmd) + sizeof(data.socket));
+                    data.len = htonl(len);
+                    data.socket = events[n].data.fd;
+                    write_cmd(&data, len + sizeof(data.len));*/
+                    // direct echo back
+                    if(write(events[n].data.fd, buf, len) < 0) {
+                        L("ERROR FWD erlang DATA RX %d : %d bytes\n", events[n].data.fd, len);
+                        perror("write : data.socket");
+                        exit(EXIT_FAILURE);
+                    }
+                } else {
+                    if (epoll_ctl(*eplfd, EPOLL_CTL_DEL,
+                                  events[n].data.fd, NULL) == -1) {
+                        perror("epoll_ctl: conn_sock");
+                        exit(EXIT_FAILURE);
+                    }
+                    L0("peer closed\n");
+                    break;
+                }
+            }
+        }
+    }
+}
+
 int main(int argc, char *argv[])
 {
     struct epoll_event ev, events[MAX_EVENTS];
-    int listen_sock, conn_sock, nfds, epollfd;
+    int listen_sock, conn_sock, nfds, eplfd_lsn_sock;
+    int eplfds[THREADS];
+    pthread_t threads[THREADS];
     struct sockaddr_in serv_addr;
-    pid_t childPid;
 
     memset(&log,   0, sizeof(log));
     memset(&conn,  0, sizeof(conn));
@@ -150,16 +219,28 @@ int main(int argc, char *argv[])
     bind(listen_sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
     listen(listen_sock, 10);
 
-    epollfd = epoll_create(10);
-    if (epollfd == -1) {
+    eplfd_lsn_sock = epoll_create(10);
+    if (eplfd_lsn_sock == -1) {
         perror("epoll_create");
         exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < THREADS; ++i) {
+        eplfds[i] = epoll_create(10);
+        if (eplfds[i] == -1) {
+            perror("epoll_create");
+            exit(EXIT_FAILURE);
+        }
+        if(pthread_create(&(threads[i]), NULL, epoll_socks_thread, &(eplfds[i]))) {
+            perror("epoll_create");
+            exit(EXIT_FAILURE);
+        }
     }
 
     // listen sock
     ev.events = EPOLLIN;
     ev.data.fd = listen_sock;
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, listen_sock, &ev) == -1) {
+    if (epoll_ctl(eplfd_lsn_sock, EPOLL_CTL_ADD, listen_sock, &ev) == -1) {
         perror("epoll_ctl: listen_sock");
         exit(EXIT_FAILURE);
     }
@@ -167,7 +248,7 @@ int main(int argc, char *argv[])
     // port std input
     ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = stdi;
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, stdi, &ev) == -1) {
+    if (epoll_ctl(eplfd_lsn_sock, EPOLL_CTL_ADD, stdi, &ev) == -1) {
         perror("epoll_ctl: conn_sock");
         exit(EXIT_FAILURE);
     }
@@ -175,8 +256,9 @@ int main(int argc, char *argv[])
     struct sockaddr_in local;
     socklen_t addrlen;
     L("listening %s %s\n", argv[1], argv[2]);
+    int eplfdidx = 0;
     for (;;) {
-        nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
+        nfds = epoll_wait(eplfd_lsn_sock, events, MAX_EVENTS, -1);
         if (nfds == -1) {
             perror("epoll_pwait");
             exit(EXIT_FAILURE);
@@ -199,7 +281,7 @@ int main(int argc, char *argv[])
                 }
                 ev.events = EPOLLIN | EPOLLET;
                 ev.data.fd = conn_sock;
-                if (epoll_ctl(epollfd, EPOLL_CTL_ADD, conn_sock,
+                if (epoll_ctl(eplfds[eplfdidx], EPOLL_CTL_ADD, conn_sock,
                             &ev) == -1) {
                     perror("epoll_ctl: conn_sock");
                     exit(EXIT_FAILURE);
@@ -209,6 +291,7 @@ int main(int argc, char *argv[])
                 conn.port = htons(local.sin_port);
                 conn.socket = conn_sock;
                 write_cmd(&conn, sizeof(conn));
+                eplfdidx = (eplfdidx + 1) % THREADS;
             } else if (events[n].data.fd == stdi) {
                 uint8_t cmd = read_cmd();
                 switch(cmd) {
@@ -222,7 +305,7 @@ int main(int argc, char *argv[])
                         break;
                     };
                     case DISCONNECT:
-                        if (epoll_ctl(epollfd, EPOLL_CTL_DEL,
+                        if (epoll_ctl(eplfd_lsn_sock, EPOLL_CTL_DEL,
                                       dconn.socket, NULL) == -1) {
                             perror("epoll_ctl: dconn.socket");
                             exit(EXIT_FAILURE);
@@ -238,32 +321,8 @@ int main(int argc, char *argv[])
                         break;
                 }
             } else {
-                while(true) {
-                    ssize_t len = recv(events[n].data.fd, data.buf, BUF_SIZE,
-                                       MSG_DONTWAIT);
-                    if (len < 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK)
-                        break;
-                    } else if (len > 0) {
-                        /*L0("RX :");
-                        for(int i = 0; i < len; ++i) {
-                            L("%02X ", data.buf[i]);
-                        }
-                        L0("\n");*/
-                        len += (sizeof(data.cmd) + sizeof(data.socket));
-                        data.len = htonl(len);
-                        data.socket = events[n].data.fd;
-                        write_cmd(&data, len + sizeof(data.len));
-                    } else {
-                        if (epoll_ctl(epollfd, EPOLL_CTL_DEL,
-                                      events[n].data.fd, NULL) == -1) {
-                            perror("epoll_ctl: conn_sock");
-                            exit(EXIT_FAILURE);
-                        }
-                        L0("peer closed\n");
-                        break;
-                    }
-                }
+                fprintf(stderr, "bad fd %d, expected %d and %d only\r\n",
+                        events[n].data.fd, listen_sock, stdi);
             }
         }
     }
